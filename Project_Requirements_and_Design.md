@@ -264,16 +264,16 @@ python -m unittest discover -s tests -v
 
 ## 8. 团队分工
 
-> 本项目按 5 人团队分工；请把姓名、学号替换为实际成员，工作量占比可按实际贡献微调。
-> 角色对应的 Git 分支与协作流程见 [README.md](README.md#-五人团队分工)。
+> 本项目按 5 人团队分工；下表与 [README.md](README.md#-五人团队分工) 保持同步。
+> 姓名、学号请在提交前替换为实际成员，工作量占比可根据实际贡献微调。
 
-| 成员 | 主要职责 | 负责模块 | Git 分支 | 工作量占比 |
-| --- | --- | --- | --- | --- |
-| 成员 1（姓名/学号待填） | 项目负责人、需求分析、文档整合、仓库与 PR 管理、冲突解决 | `README.md`、`Project_Requirements_and_Design.md` | `docs/requirements` | 20% |
-| 成员 2（姓名/学号待填） | 核心算法：进制解析、按权展开、除基取余、步骤生成 | `base_converter/converter.py` | `feature/core-algorithm` | 20% |
-| 成员 3（姓名/学号待填） | 界面与交互：布局、结果卡、步骤卡、事件响应 | `base_converter/app.py`、`theme.py`、`widgets.py` | `feature/gui` | 25% |
-| 成员 4（姓名/学号待填） | 测试与质量：单元测试、边界测试、随机往返测试、Bug 修复 | `tests/test_converter.py` | `test/quality` | 15% |
-| 成员 5（姓名/学号待填） | 打包与演示：EXE、图标、manifest、截图、运行说明、课堂演示 | `assets/`、`screenshots/`、`进制转换演示器.exe` | `build/release` | 20% |
+| 成员 | 角色 | 负责内容 | 主要文件 | Git 分支 | 占比 |
+| --- | --- | --- | --- | --- | --- |
+| 成员 1（姓名待填） | 项目负责人 / 文档与 Git | 需求分析、文档整合、仓库管理、PR 审查、冲突解决 | `README.md`、`Project_Requirements_and_Design.md` | `docs/requirements` | 20% |
+| 成员 2（姓名待填） | 核心算法 | 进制解析、按权展开、除基取余、步骤数据生成 | `base_converter/converter.py` | `feature/core-algorithm` | 20% |
+| 成员 3（姓名待填） | 界面与交互 | Tkinter 布局、结果卡、步骤卡片、事件响应 | `base_converter/app.py`、`theme.py`、`widgets.py` | `feature/gui` | 25% |
+| 成员 4（姓名待填） | 测试与质量 | 单元测试、边界与随机测试、Bug 定位与修复 | `tests/test_converter.py` | `test/quality` | 15% |
+| 成员 5（姓名待填） | 打包与演示 | EXE 打包、图标与 manifest、截图、运行说明、课堂演示 | `assets/`、`screenshots/`、`进制转换演示器.exe` | `build/release` | 20% |
 
 ### 8.1 Git 协作流程
 
