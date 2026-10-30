@@ -131,6 +131,30 @@ Linux 如缺少 Tkinter，可先安装 `sudo apt install python3-tk`。
 
 ---
 
+## 👥 五人团队分工
+
+> 下表按 5 人团队设计，**姓名、学号请在提交前替换为实际成员**；工作量占比可根据实际贡献微调。
+
+| 成员 | 角色 | 负责内容 | 主要文件 | Git 分支 | 占比 |
+| --- | --- | --- | --- | --- | --- |
+| 成员 1（姓名待填） | 项目负责人 / 文档与 Git | 需求分析、文档整合、仓库管理、PR 审查、冲突解决 | `README.md`、`Project_Requirements_and_Design.md` | `docs/requirements` | 20% |
+| 成员 2（姓名待填） | 核心算法 | 进制解析、按权展开、除基取余、步骤数据生成 | `base_converter/converter.py` | `feature/core-algorithm` | 20% |
+| 成员 3（姓名待填） | 界面与交互 | Tkinter 布局、结果卡、步骤卡片、事件响应 | `base_converter/app.py`、`theme.py`、`widgets.py` | `feature/gui` | 25% |
+| 成员 4（姓名待填） | 测试与质量 | 单元测试、边界与随机测试、Bug 定位与修复 | `tests/test_converter.py` | `test/quality` | 15% |
+| 成员 5（姓名待填） | 打包与演示 | EXE 打包、图标与 manifest、截图、运行说明、课堂演示 | `assets/`、`screenshots/`、`进制转换演示器.exe` | `build/release` | 20% |
+
+### Git 协作约定
+
+- `main` 分支始终保持可运行；每位成员在表格对应的功能分支上开发，再发起 Pull Request。
+- 每个 PR 至少由另一名成员审查后合并；合并完成后删除功能分支。
+- 提交信息建议采用 `feat:`、`fix:`、`docs:`、`test:`、`build:` 前缀，便于阅读提交历史。
+- 建议安排一次真实的合并冲突演练：两人修改同一段文字/同一个参数，在本地解决冲突后再合并，并保留冲突解决记录。
+- 当前仓库已有一个可运行的初始基线；后续成员请使用各自的 GitHub 账号提交，以便体现真实的协作记录。
+
+更完整的模块设计、测试方案与团队表格见 [Project_Requirements_and_Design.md](Project_Requirements_and_Design.md)。
+
+---
+
 ## 📁 项目结构
 
 ```text

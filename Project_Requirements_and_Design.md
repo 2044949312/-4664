@@ -264,14 +264,24 @@ python -m unittest discover -s tests -v
 
 ## 8. 团队分工
 
-> 请团队按实际情况填写。
+> 本项目按 5 人团队分工；请把姓名、学号替换为实际成员，工作量占比可按实际贡献微调。
+> 角色对应的 Git 分支与协作流程见 [README.md](README.md#-五人团队分工)。
 
-| 成员 | 主要职责 | 负责模块 | 工作量占比 |
-| --- | --- | --- | --- |
-| 成员 A（待填写） | 需求分析、文档整合 | README、设计文档 | 25% |
-| 成员 B（待填写） | 核心算法与测试 | `converter.py`、`tests/` | 25% |
-| 成员 C（待填写） | 界面与交互 | `app.py`、`widgets.py` | 30% |
-| 成员 D（待填写） | 视觉设计、演示与验收 | `theme.py`、截图、演示 PPT | 20% |
+| 成员 | 主要职责 | 负责模块 | Git 分支 | 工作量占比 |
+| --- | --- | --- | --- | --- |
+| 成员 1（姓名/学号待填） | 项目负责人、需求分析、文档整合、仓库与 PR 管理、冲突解决 | `README.md`、`Project_Requirements_and_Design.md` | `docs/requirements` | 20% |
+| 成员 2（姓名/学号待填） | 核心算法：进制解析、按权展开、除基取余、步骤生成 | `base_converter/converter.py` | `feature/core-algorithm` | 20% |
+| 成员 3（姓名/学号待填） | 界面与交互：布局、结果卡、步骤卡、事件响应 | `base_converter/app.py`、`theme.py`、`widgets.py` | `feature/gui` | 25% |
+| 成员 4（姓名/学号待填） | 测试与质量：单元测试、边界测试、随机往返测试、Bug 修复 | `tests/test_converter.py` | `test/quality` | 15% |
+| 成员 5（姓名/学号待填） | 打包与演示：EXE、图标、manifest、截图、运行说明、课堂演示 | `assets/`、`screenshots/`、`进制转换演示器.exe` | `build/release` | 20% |
+
+### 8.1 Git 协作流程
+
+1. 从最新的 `main` 创建个人功能分支，例如 `feature/gui`。
+2. 在功能分支上完成修改，使用清晰的提交信息并推送到 GitHub。
+3. 发起 Pull Request，至少由另一名成员完成 Code Review 后合并。
+4. 合并后删除已完成的远程功能分支；`main` 始终保持可运行。
+5. 至少完成一次真实冲突演练：两人修改同一段文档或同一参数，在本地解决冲突后再合并，并保留相关记录。
 
 ---
 
