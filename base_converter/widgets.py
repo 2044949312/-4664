@@ -76,6 +76,7 @@ class RoundedButton(tk.Canvas):
         self._enabled = not disabled
         self._hovered = False
         self._focused = False
+        self._cursor = cursor
         self._shape_ids: list[int] = []
         self._text_id: int | None = None
 
@@ -92,6 +93,9 @@ class RoundedButton(tk.Canvas):
     # ------------------------------------------------------------------ 绘制
     def _redraw(self, _event=None) -> None:
         self.delete("all")
+        # 重建所有图形项，避免 _shape_ids 无限累积旧 item id。
+        self._shape_ids = []
+        self._text_id = None
         w = max(self.winfo_width(), 2)
         h = max(self.winfo_height(), 2)
         if self._border:
@@ -126,6 +130,16 @@ class RoundedButton(tk.Canvas):
                     fill=self._current_fill(),
                     outline="",
                 )
+            )
+        if self._focused and self._enabled:
+            # 键盘焦点环：仅在可获得焦点且启用时绘制。
+            self.create_polygon(
+                *_rounded_points(1.5, 1.5, w - 1.5, h - 1.5, max(2, self._radius - 1)),
+                smooth=True,
+                splinesteps=24,
+                fill="",
+                outline=theme.ACCENT_BRIGHT,
+                width=2,
             )
         self._text_id = self.create_text(
             w / 2,
@@ -173,9 +187,11 @@ class RoundedButton(tk.Canvas):
 
     def _on_focus(self, _event=None) -> None:
         self._focused = True
+        self._redraw()
 
     def _on_blur(self, _event=None) -> None:
         self._focused = False
+        self._redraw()
 
     # ------------------------------------------------------------------ 接口
     def set_text(self, text: str) -> None:
@@ -184,9 +200,13 @@ class RoundedButton(tk.Canvas):
             self.itemconfigure(self._text_id, text=text)
 
     def set_enabled(self, enabled: bool) -> None:
-        self._enabled = enabled
-        self.configure(cursor="hand2" if enabled else "arrow")
+        self._enabled = bool(enabled)
+        self.configure(takefocus=1 if self._enabled else 0)
+        self.configure(cursor=self._cursor if self._enabled else "arrow")
         self._refresh_fill()
+        # 禁用时移除焦点环；重新启用且仍持有焦点时恢复焦点环。
+        if self._focused:
+            self._redraw()
 
     def set_colors(self, fill: str, hover_fill: str, text_color: str) -> None:
         self._fill = fill
@@ -197,6 +217,9 @@ class RoundedButton(tk.Canvas):
 
 class BasePickerButton(RoundedButton):
     """显示当前进制的按钮，点击后弹出一个 2–36 进制的选择面板。"""
+
+    # 所有存活的实例，用于在某个弹窗持有 grab 时把点击转发给另一个选择器。
+    _instances: list["BasePickerButton"] = []
 
     def __init__(
         self,
@@ -226,9 +249,46 @@ class BasePickerButton(RoundedButton):
             font=theme.font(10),
             border=theme.BORDER_SOFT,
         )
+        if self not in BasePickerButton._instances:
+            BasePickerButton._instances.append(self)
+        self.bind("<Destroy>", self._on_destroy, add="+")
 
     def _button_text(self) -> str:
         return f"{self._base} · {self._name_by_base.get(self._base, '')}   ▾"
+
+    # -------------------------------------------------------------- 实例登记
+    def _on_destroy(self, event=None) -> None:
+        if event is not None and getattr(event, "widget", None) is not self:
+            return
+        try:
+            BasePickerButton._instances.remove(self)
+        except ValueError:
+            pass
+        self._popup = None
+
+    @classmethod
+    def _live_instances(cls) -> list["BasePickerButton"]:
+        alive: list[BasePickerButton] = []
+        for picker in list(cls._instances):
+            try:
+                if picker.winfo_exists():
+                    alive.append(picker)
+            except tk.TclError:
+                pass
+        return alive
+
+    def _contains_screen_point(self, x_root: int, y_root: int) -> bool:
+        """判断屏幕坐标是否落在本按钮的可见区域内。"""
+        try:
+            if not self.winfo_ismapped():
+                return False
+            x = self.winfo_rootx()
+            y = self.winfo_rooty()
+            width = self.winfo_width()
+            height = self.winfo_height()
+        except tk.TclError:
+            return False
+        return x <= x_root < x + width and y <= y_root < y + height
 
     def get_base(self) -> int:
         return self._base
@@ -355,19 +415,51 @@ class BasePickerButton(RoundedButton):
         popup.focus_set()
         popup.grab_set()
 
-        popup.bind("<Escape>", lambda _event: self._close_popup())
+        popup.bind("<Escape>", self._on_popup_escape)
         popup.bind("<Button-1>", self._on_popup_click)
         popup.bind("<FocusOut>", self._on_popup_focus_out)
+        popup.bind("<Return>", self._on_popup_confirm)
+        popup.bind("<KP_Enter>", self._on_popup_confirm)
+        popup.bind("<F5>", self._on_popup_confirm)
 
-    def _on_popup_click(self, event) -> None:
+    def _on_popup_click(self, event):
         popup = self._popup
         if popup is None:
-            return
-        if event.widget is popup:
+            return None
+        widget = getattr(event, "widget", None)
+        x_root = getattr(event, "x_root", None)
+        y_root = getattr(event, "y_root", None)
+        if widget is popup and x_root is not None and y_root is not None:
+            # 弹窗持有 grab 时，点击另一个选择器按钮会被吞掉；
+            # 这里直接把点击转交给那个按钮，实现一次点击完成切换。
+            for other in BasePickerButton._live_instances():
+                if other is self:
+                    continue
+                if other._contains_screen_point(x_root, y_root):
+                    self._close_popup()
+                    other._open_popup()
+                    return "break"
+        if widget is popup:
             width = popup.winfo_width()
             height = popup.winfo_height()
-            if not (0 <= event.x < width and 0 <= event.y < height):
+            x = getattr(event, "x", None)
+            y = getattr(event, "y", None)
+            if x is not None and y is not None and not (0 <= x < width and 0 <= y < height):
                 self._close_popup()
+        return None
+
+    def _on_popup_escape(self, _event=None):
+        self._close_popup(focus_back=True)
+        return "break"
+
+    def _on_popup_confirm(self, _event=None):
+        """Return / KP_Enter / F5：关闭弹窗后触发一次选择回调。"""
+        if self._popup is None:
+            return "break"
+        self._close_popup(focus_back=True)
+        if self._on_select is not None:
+            self._on_select()
+        return "break"
 
     def _on_popup_focus_out(self, event) -> None:
         popup = self._popup
@@ -389,7 +481,7 @@ class BasePickerButton(RoundedButton):
         self.focus_set()
         self._on_select()
 
-    def _close_popup(self) -> None:
+    def _close_popup(self, focus_back: bool = False) -> None:
         popup = self._popup
         if popup is None:
             return
@@ -402,6 +494,11 @@ class BasePickerButton(RoundedButton):
             popup.destroy()
         except tk.TclError:
             pass
+        if focus_back:
+            try:
+                self.focus_set()
+            except tk.TclError:
+                pass
 
 
 class ScrollableFrame(tk.Frame):
@@ -410,8 +507,16 @@ class ScrollableFrame(tk.Frame):
     使用 .inner 作为子控件的父容器，.clear() 可清空内容。
     """
 
-    def __init__(self, parent: tk.Misc, *, bg: str = theme.BG) -> None:
+    def __init__(
+        self,
+        parent: tk.Misc,
+        *,
+        bg: str = theme.BG,
+        autohide_scrollbar: bool = False,
+    ) -> None:
         super().__init__(parent, bg=bg)
+        self._autohide_scrollbar = bool(autohide_scrollbar)
+        self._scrollbar_shown = True
         style = ttk.Style(self)
         try:
             style.theme_use("clam")
@@ -456,17 +561,52 @@ class ScrollableFrame(tk.Frame):
         self._window_id = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
         self.inner.bind("<Configure>", self._on_inner_configure)
         self.canvas.bind("<Configure>", self._on_canvas_configure)
+        self._update_scrollbar_visibility()
 
     def _on_inner_configure(self, _event=None) -> None:
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        self._update_scrollbar_visibility()
 
     def _on_canvas_configure(self, event) -> None:
         self.canvas.itemconfigure(self._window_id, width=event.width)
+        self._update_scrollbar_visibility()
+
+    def _update_scrollbar_visibility(self) -> None:
+        """自动隐藏模式下：内容适配时隐藏滚动条，否则显示。"""
+        if not self._autohide_scrollbar:
+            if not self._scrollbar_shown:
+                self.scrollbar.grid()
+                self._scrollbar_shown = True
+            return
+        bbox = self.canvas.bbox("all")
+        content_height = (bbox[3] - bbox[1]) if bbox else 0
+        try:
+            canvas_height = self.canvas.winfo_height()
+        except tk.TclError:
+            canvas_height = 0
+        should_show = content_height > canvas_height + 1
+        if should_show == self._scrollbar_shown:
+            return
+        if should_show:
+            self.scrollbar.grid()
+        else:
+            self.scrollbar.grid_remove()
+        self._scrollbar_shown = should_show
 
     def clear(self) -> None:
         for child in self.inner.winfo_children():
             child.destroy()
         self.canvas.yview_moveto(0)
+        # Tk 在子控件销毁后不会主动刷新 Frame 的请求尺寸（残留旧高度），
+        # 通过重新设置宽度强制触发一次尺寸重算，滚动条自动隐藏才能生效。
+        self._resync_inner_size()
+
+    def _resync_inner_size(self) -> None:
+        try:
+            self.inner.configure(width=max(1, self.canvas.winfo_width()))
+        except tk.TclError:
+            pass
+        self._update_scrollbar_visibility()
 
     def scroll_to_top(self) -> None:
         self.canvas.yview_moveto(0)
@@ -480,9 +620,22 @@ class ScrollableFrame(tk.Frame):
         return False
 
     def on_mousewheel(self, event) -> None:
-        if event.delta:
-            steps = -1 * int(event.delta / 120)
-            self.canvas.yview_scroll(steps * 2, "units")
+        """跨平台滚轮处理：Windows/macOS 用 delta，Linux 用 Button-4/5 的 num。"""
+        num = getattr(event, "num", None)
+        if num in (4, 5):
+            steps = -1 if num == 4 else 1
+        else:
+            delta = getattr(event, "delta", 0)
+            try:
+                delta_value = float(delta)
+            except (TypeError, ValueError):
+                delta_value = 0.0
+            if delta_value == 0:
+                return
+            # 非 120 整数倍的 delta 也至少滚动一步，避免 int(delta/120) == 0 时无响应。
+            magnitude = max(1, int(abs(delta_value) / 120))
+            steps = -magnitude if delta_value > 0 else magnitude
+        self.canvas.yview_scroll(steps * 2, "units")
 
 
 def divider(parent: tk.Misc, *, color: str = theme.BORDER_SOFT, pady: int = 0) -> tk.Frame:

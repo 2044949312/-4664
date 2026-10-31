@@ -3,8 +3,14 @@
 from __future__ import annotations
 
 import re
+import sys
+import tempfile
 import time
 import tkinter as tk
+import tkinter.font as tkfont
+import traceback
+from pathlib import Path
+from tkinter import messagebox, ttk
 
 from . import theme
 from .converter import (
@@ -20,25 +26,32 @@ from .converter import (
 )
 from .widgets import BasePickerButton, RoundedButton, ScrollableFrame, _rounded_points, divider
 
+APP_VERSION = "1.1.0"
+
+# 超过该行数后，步骤表格改用单个只读 Text 控件渲染：
+# 这样即使 96 位输入产生数百行，也不会因为创建上千个 Label 而冻结界面。
+MAX_GRID_ROWS = 40
+
+# 预览成功后再次按 Enter 时忽略重复触发；这些键也不应该触发实时预览。
+_PREVIEW_IGNORED_KEYS = {
+    "Left", "Right", "Up", "Down", "Home", "End", "Tab", "Shift_L", "Shift_R",
+    "Control_L", "Control_R", "Alt_L", "Alt_R", "Escape", "Return", "KP_Enter", "F5",
+}
+
 
 class BaseConverterApp(tk.Tk):
     """进制转换演示器主窗口。"""
 
     def __init__(self) -> None:
         super().__init__()
-        # 统一不同缩放比例下的视觉大小：高 DPI 屏幕上最多放大到 1.5 倍，
-        # 避免 1240×840 的窗口里文字过大、内容被挤出屏幕。
-        try:
-            natural_scaling = float(self.tk.call("tk", "scaling"))
-            self.tk.call("tk", "scaling", min(max(natural_scaling, 1.333), 1.5))
-        except (tk.TclError, ValueError):
-            pass
+        # 统一不同缩放比例下的视觉大小：低缩放保持原样，高 DPI 最多放大到 2.0 倍；
+        # 窗口尺寸也会根据屏幕可用区域和缩放比例自适应，避免小屏/4K 屏体验失控。
+        self._ui_scale = self._configure_scaling()
         theme.resolve_fonts(self)
 
-        self.title("进制转换演示器 · Base Conversion Explorer")
+        self.title(f"进制转换演示器 v{APP_VERSION} · Base Conversion Explorer")
         self.configure(bg=theme.BG)
-        self.minsize(1180, 840)
-        self._center_window(1240, 880)
+        self._setup_window()
         self._set_window_icon()
 
         # 数据状态
@@ -46,6 +59,7 @@ class BaseConverterApp(tk.Tk):
             (base, base_name(base)) for base in range(MIN_BASE, MAX_BASE + 1)
         ]
         self.number_var = tk.StringVar(value="255")
+        self.hint_var = tk.StringVar(value="")
         self.error_var = tk.StringVar(value="")
         self.expression_var = tk.StringVar(value="等待输入")
         self.result_var = tk.StringVar(value="—")
@@ -56,21 +70,106 @@ class BaseConverterApp(tk.Tk):
         self.result: ConversionResult | None = None
         self._preview_job: str | None = None
         self._toast_job: str | None = None
-        self._last_elapsed_ms: float = 0.0
+        self._last_state_key: tuple[str, int, int] | None = None
+        self._busy = False
 
         self._build_ui()
         self._bind_shortcuts()
+        self.number_var.trace_add("write", self._on_number_changed)
+        self._on_number_changed()
 
         # 首次打开时直接展示 255 → 二进制 的示例，方便课堂演示。
         self.after(180, self.convert)
 
-    # ------------------------------------------------------------------ 基础
-    def _center_window(self, width: int, height: int) -> None:
-        screen_w = self.winfo_screenwidth()
-        screen_h = self.winfo_screenheight()
-        x = max(0, (screen_w - width) // 2)
-        y = max(0, (screen_h - height) // 2 - 24)
+    # ------------------------------------------------------------------ 窗口
+    def _configure_scaling(self) -> float:
+        try:
+            natural_scaling = float(self.tk.call("tk", "scaling"))
+        except (tk.TclError, ValueError):
+            natural_scaling = 1.333
+        scale = min(max(natural_scaling, 1.333), 2.0)
+        try:
+            self.tk.call("tk", "scaling", scale)
+        except tk.TclError:
+            pass
+        return scale
+
+    @staticmethod
+    def _work_area() -> tuple[int, int, int, int]:
+        """返回主屏幕可用桌面区域 (x, y, width, height)，单位为物理像素。"""
+        if sys.platform == "win32":
+            try:
+                import ctypes
+
+                class _Rect(ctypes.Structure):
+                    _fields_ = [
+                        ("left", ctypes.c_long),
+                        ("top", ctypes.c_long),
+                        ("right", ctypes.c_long),
+                        ("bottom", ctypes.c_long),
+                    ]
+
+                rect = _Rect()
+                ok = ctypes.windll.user32.SystemParametersInfoW(
+                    0x0030, 0, ctypes.byref(rect), 0  # SPI_GETWORKAREA
+                )
+                width = rect.right - rect.left
+                height = rect.bottom - rect.top
+                if ok and width > 320 and height > 240:
+                    return rect.left, rect.top, width, height
+            except Exception:
+                pass
+        return 0, 0, 0, 0
+
+    def _setup_window(self) -> None:
+        work_x, work_y, work_w, work_h = self._work_area()
+        if work_w <= 0 or work_h <= 0:
+            work_x, work_y = 0, 0
+            work_w = self.winfo_screenwidth()
+            work_h = self.winfo_screenheight()
+
+        # 高 DPI（>150%）时适当放大基准窗口，避免 4K 屏幕上界面过小。
+        factor = min(1.35, max(1.0, self._ui_scale / 1.5))
+        base_w = int(round(1240 * factor))
+        base_h = int(round(880 * factor))
+        width = min(base_w, max(720, work_w - 40))
+        height = min(base_h, max(560, work_h - 80))
+        width = min(width, work_w - 20)
+        height = min(height, work_h - 20)
+        x = work_x + max(0, (work_w - width) // 2)
+        y = work_y + max(0, (work_h - height) // 2)
         self.geometry(f"{width}x{height}+{x}+{y}")
+        self.minsize(min(1000, width), min(640, height))
+
+    # ------------------------------------------------------------------ 基础
+    def report_callback_exception(self, exc, val, tb) -> None:  # type: ignore[override]
+        """未捕获的界面回调异常：写日志并提示用户，避免窗口无提示消失。"""
+        try:
+            detail = "".join(traceback.format_exception(exc, val, tb))
+        except Exception:
+            detail = f"{exc.__name__}: {val}"
+        log_path = None
+        try:
+            log_path = Path(tempfile.gettempdir()) / "进制转换演示器.log"
+            with log_path.open("a", encoding="utf-8") as handle:
+                handle.write(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}]\n{detail}\n")
+        except OSError:
+            log_path = None
+        hint = f"\n\n详细信息已写入:\n{log_path}" if log_path else ""
+        try:
+            messagebox.showerror(
+                "程序内部错误",
+                f"界面发生未处理的异常：\n{val}{hint}",
+                parent=self,
+            )
+        except tk.TclError:
+            pass
+
+    @staticmethod
+    def _shorten(text: str, limit: int = 48) -> str:
+        if len(text) <= limit:
+            return text
+        return text[: limit - 1] + "…"
 
     def _set_window_icon(self) -> None:
         """用 PhotoImage 画一个简单的双向箭头图标，避免依赖外部图片。"""
@@ -88,7 +187,11 @@ class BaseConverterApp(tk.Tk):
     def _bind_shortcuts(self) -> None:
         self.bind("<Return>", self.convert)
         self.bind("<F5>", self.convert)
-        self.bind_all("<MouseWheel>", self._on_mousewheel)
+        self.bind("<Escape>", self._on_escape)
+        # Windows 使用 <MouseWheel>，Linux/X11 的滚轮则是 Button-4/5。
+        for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            self.bind_all(sequence, self._on_mousewheel)
+        self.bind("<Control-Shift-C>", lambda _event: self._copy_expression())
 
     # ------------------------------------------------------------------ 布局
     def _build_ui(self) -> None:
@@ -99,8 +202,11 @@ class BaseConverterApp(tk.Tk):
         body.grid_columnconfigure(0, weight=0, minsize=356)
         body.grid_columnconfigure(1, weight=1)
 
-        input_panel = self._build_input_panel(body)
-        input_panel.grid(row=0, column=0, sticky="nsew", padx=(0, 18))
+        # 左侧输入区放进可滚动容器：小屏（如 1366×768 投影）下也能看到全部设置。
+        self.input_scroll = ScrollableFrame(body, bg=theme.BG, autohide_scrollbar=True)
+        self.input_scroll.grid(row=0, column=0, sticky="nsew", padx=(0, 18))
+        input_panel = self._build_input_panel(self.input_scroll.inner)
+        input_panel.pack(fill="x", padx=(0, 6))
         right = self._build_right_panel(body)
         right.grid(row=0, column=1, sticky="nsew")
 
@@ -192,14 +298,31 @@ class BaseConverterApp(tk.Tk):
             pady=2,
         ).pack(side="right")
 
+        field_row = tk.Frame(inner, bg=theme.SURFACE)
+        field_row.pack(fill="x", pady=(12, 7))
         tk.Label(
-            inner,
+            field_row,
             text="待转换数字",
             font=theme.font(9, "bold"),
             fg=theme.TEXT_DIM,
             bg=theme.SURFACE,
             anchor="w",
-        ).pack(fill="x", pady=(18, 7))
+        ).pack(side="left")
+        self.clear_button = RoundedButton(
+            field_row,
+            "清空",
+            self._clear_input,
+            fill=theme.SURFACE_2,
+            hover_fill=theme.SURFACE_3,
+            text_color=theme.TEXT_DIM,
+            height=24,
+            width=52,
+            radius=7,
+            font=theme.font(8),
+            border=theme.BORDER_SOFT,
+            background=theme.SURFACE,
+        )
+        self.clear_button.pack(side="right")
 
         self.entry = tk.Entry(
             inner,
@@ -216,9 +339,21 @@ class BaseConverterApp(tk.Tk):
             selectbackground=theme.ACCENT_DARK,
             selectforeground=theme.TEXT,
         )
-        self.entry.pack(fill="x", ipady=11)
+        self.entry.pack(fill="x", ipady=10)
         self.entry.bind("<KeyRelease>", self._schedule_preview)
         self.entry.bind("<Control-a>", self._select_all)
+
+        self.hint_label = tk.Label(
+            inner,
+            textvariable=self.hint_var,
+            font=theme.font(8),
+            fg=theme.MUTED,
+            bg=theme.SURFACE,
+            anchor="w",
+            justify="left",
+            wraplength=300,
+        )
+        self.hint_label.pack(fill="x", pady=(4, 0))
 
         self.error_label = tk.Label(
             inner,
@@ -228,15 +363,15 @@ class BaseConverterApp(tk.Tk):
             bg=theme.SURFACE,
             anchor="nw",
             justify="left",
-            height=2,
+            height=1,
             wraplength=300,
         )
-        self.error_label.pack(fill="x", pady=(5, 0))
+        self.error_label.pack(fill="x", pady=(4, 0))
 
-        divider(inner, pady=(2, 14))
+        divider(inner, pady=(2, 10))
 
         selector = tk.Frame(inner, bg=theme.SURFACE)
-        selector.pack(fill="x", pady=(0, 14))
+        selector.pack(fill="x", pady=(0, 10))
         selector.grid_columnconfigure(0, weight=1)
         selector.grid_columnconfigure(2, weight=1)
 
@@ -305,9 +440,9 @@ class BaseConverterApp(tk.Tk):
             font=theme.font(11, "bold"),
             background=theme.SURFACE,
         )
-        self.convert_button.pack(fill="x", pady=(2, 16))
+        self.convert_button.pack(fill="x", pady=(2, 10))
 
-        divider(inner, pady=(0, 14))
+        divider(inner, pady=(0, 10))
 
         tk.Label(
             inner,
@@ -316,7 +451,7 @@ class BaseConverterApp(tk.Tk):
             fg=theme.TEXT_DIM,
             bg=theme.SURFACE,
             anchor="w",
-        ).pack(fill="x", pady=(0, 8))
+        ).pack(fill="x", pady=(0, 4))
 
         examples = tk.Frame(inner, bg=theme.SURFACE)
         examples.pack(fill="x")
@@ -342,10 +477,10 @@ class BaseConverterApp(tk.Tk):
                 column=col,
                 sticky="ew",
                 padx=(0, 5) if col == 0 else (5, 0),
-                pady=(0, 7),
+                pady=(0, 5),
             )
 
-        divider(inner, pady=(5, 12))
+        divider(inner, pady=(4, 10))
 
         tk.Label(
             inner,
@@ -361,7 +496,7 @@ class BaseConverterApp(tk.Tk):
             highlightbackground=theme.BORDER_SOFT,
             highlightthickness=1,
             padx=11,
-            pady=9,
+            pady=7,
         )
         hint_box.pack(fill="x")
         tk.Label(
@@ -380,7 +515,7 @@ class BaseConverterApp(tk.Tk):
             fg=theme.MUTED,
             bg=theme.BG_SOFT,
             anchor="w",
-        ).pack(anchor="w", pady=(5, 0))
+        ).pack(anchor="w", pady=(4, 0))
 
         return card
 
@@ -418,6 +553,22 @@ class BaseConverterApp(tk.Tk):
             bg=theme.SURFACE,
             anchor="w",
         ).pack(side="left")
+        self.copy_expr_button = RoundedButton(
+            top,
+            "复制表达式",
+            self._copy_expression,
+            fill=theme.SURFACE_2,
+            hover_fill=theme.SURFACE_3,
+            text_color=theme.TEXT_DIM,
+            height=28,
+            width=96,
+            radius=8,
+            font=theme.font(8),
+            border=theme.BORDER_SOFT,
+            background=theme.SURFACE,
+            disabled=True,
+        )
+        self.copy_expr_button.pack(side="right", padx=(0, 6))
         self.copy_button = RoundedButton(
             top,
             "复制结果",
@@ -530,7 +681,7 @@ class BaseConverterApp(tk.Tk):
         ).pack(side="left")
         tk.Label(
             footer,
-            text="纯 Python 标准库 · Tkinter",
+            text=f"纯 Python 标准库 · Tkinter · v{APP_VERSION}",
             font=theme.font(8),
             fg=theme.MUTED_2,
             bg=theme.BG,
@@ -543,33 +694,56 @@ class BaseConverterApp(tk.Tk):
         return "break"
 
     def _on_mousewheel(self, event):
-        if self.steps.contains_pointer(event.x_root, event.y_root):
-            self.steps.on_mousewheel(event)
+        for area in (self.input_scroll, self.steps):
+            if area.contains_pointer(event.x_root, event.y_root):
+                area.on_mousewheel(event)
+                return "break"
+        return None
+
+    def _on_escape(self, _event=None):
+        """Esc：清空输入（输入框获得焦点时）。"""
+        if self.focus_get() is self.entry and self.number_var.get():
+            self._clear_input()
             return "break"
         return None
 
+    def _on_number_changed(self, *_args) -> None:
+        if self.number_var.get().strip():
+            self.hint_var.set("支持 A–Z 数码、空格/下划线、0b/0o/0x 前缀；仅演示整数")
+        else:
+            self.hint_var.set("输入整数，例如 255、FF、1010、-1010")
+
     def _on_base_changed(self, _event=None) -> None:
+        self.entry.focus_set()
         self.convert()
 
-    def _schedule_preview(self, event=None) -> None:
-        if event is not None and event.keysym in {
-            "Left", "Right", "Up", "Down", "Home", "End", "Tab", "Shift_L", "Shift_R",
-            "Control_L", "Control_R", "Alt_L", "Alt_R", "Escape",
-        }:
-            return
+    def _cancel_preview(self) -> None:
         if self._preview_job is not None:
             try:
                 self.after_cancel(self._preview_job)
             except tk.TclError:
                 pass
+            self._preview_job = None
+
+    def _schedule_preview(self, event=None) -> None:
+        # Enter/F5 已经会立即转换，KeyRelease 不应再排一次预览，否则会重复渲染。
+        if event is not None and event.keysym in _PREVIEW_IGNORED_KEYS:
+            return
+        self._cancel_preview()
         self._preview_job = self.after(380, self._preview)
 
     def _preview(self) -> None:
         self._preview_job = None
+        source_base, target_base = self._selected_bases()
+        text = self.number_var.get()
+        key = (text, source_base, target_base)
+        if key == self._last_state_key:
+            return
         try:
-            source_base, target_base = self._selected_bases()
-            result = build_conversion(self.number_var.get(), source_base, target_base)
-        except ConversionError:
+            result = build_conversion(text, source_base, target_base)
+        except ConversionError as exc:
+            # 预览失败必须让用户看到“当前输入无效”，不能继续展示旧结果。
+            self._show_error(exc.message, key)
             return
         self._apply_result(result, silent=True)
 
@@ -582,9 +756,13 @@ class BaseConverterApp(tk.Tk):
 
     def _swap_bases(self) -> None:
         source, target = self._selected_bases()
-        # 如果当前有有效结果，就把结果带回输入框，交换后正好完成一次“往返验证”。
-        if self.result is not None:
-            self.number_var.set(self.result.result_text)
+        # 先按当前输入重新转换：不能用上一次的 self.result 覆盖用户刚输入的数字。
+        try:
+            current = build_conversion(self.number_var.get(), source, target)
+        except ConversionError:
+            current = None
+        if current is not None:
+            self.number_var.set(current.result_text)
         self._set_bases(target, source)
         self.convert()
 
@@ -596,50 +774,102 @@ class BaseConverterApp(tk.Tk):
         self.convert()
 
     # ------------------------------------------------------------------ 转换
+    def _set_busy(self, busy: bool) -> None:
+        if busy == self._busy:
+            return
+        self._busy = busy
+        try:
+            self.configure(cursor="watch" if busy else "")
+            if busy:
+                self.update_idletasks()
+        except tk.TclError:
+            pass
+
     def convert(self, _event=None) -> None:
-        if self._preview_job is not None:
-            try:
-                self.after_cancel(self._preview_job)
-            except tk.TclError:
-                pass
-            self._preview_job = None
+        self._cancel_preview()
         source_base, target_base = self._selected_bases()
+        text = self.number_var.get()
         started = time.perf_counter()
         try:
-            result = build_conversion(self.number_var.get(), source_base, target_base)
+            result = build_conversion(text, source_base, target_base)
         except ConversionError as exc:
-            self._show_error(exc.message)
+            self._show_error(exc.message, (text, source_base, target_base))
+            self.entry.focus_set()
             return
-        elapsed_ms = (time.perf_counter() - started) * 1000
-        self._apply_result(result, elapsed_ms=elapsed_ms)
+        calc_ms = (time.perf_counter() - started) * 1000
+        self._set_busy(True)
+        try:
+            self._apply_result(result, calc_ms=calc_ms)
+        finally:
+            self._set_busy(False)
+        # 转换后把焦点还给输入框：继续输入/按 Enter 都能直接生效。
+        self.entry.focus_set()
 
-    def _apply_result(self, result: ConversionResult, elapsed_ms: float = 0.0, silent: bool = False) -> None:
+    def _apply_result(
+        self,
+        result: ConversionResult,
+        *,
+        calc_ms: float | None = None,
+        silent: bool = False,
+    ) -> None:
+        self._last_state_key = (result.raw, result.source_base, result.target_base)
         self.result = result
-        self._last_elapsed_ms = elapsed_ms
+        self._reset_copy_buttons()
         self.error_var.set("")
+        self.error_label.configure(height=1)
         self.entry.configure(highlightbackground=theme.BORDER, highlightcolor=theme.ACCENT)
-        self.expression_var.set(result.expression())
-        self.result_var.set(result.result_text)
-        self.result_label.configure(fg=theme.TEXT)
-        self._fit_result_font(result.result_text)
 
-        digit_count = len(result.target_digits.lstrip("-"))
-        meta_parts = [f"十进制值 {result.decimal_text}", f"结果 {digit_count} 位", f"{len(result.steps)} 个步骤"]
+        # 超长结果只显示前 120 位：避免结果卡占满整个窗口；完整值仍可复制。
+        full_result = result.result_text
+        shown_result = (
+            full_result if len(full_result) <= 120 else full_result[:117] + "…"
+        )
+        full_expression = result.expression()
+        shown_expression = (
+            full_expression
+            if len(full_expression) <= 200
+            else full_expression[:199] + "…"
+        )
+        decimal_text = result.decimal_text
+        shown_decimal = (
+            decimal_text if len(decimal_text) <= 60 else decimal_text[:57] + "…"
+        )
+        result_size = self._fit_result_font(shown_result)
+        expr_limit = self._label_char_limit(self.expression_label, theme.mono(10))
+        result_limit = self._label_char_limit(
+            self.result_label, theme.mono(result_size, "bold")
+        )
+        self.expression_var.set(self._hard_wrap_tokens(shown_expression, expr_limit))
+        self.result_var.set(self._hard_wrap_tokens(shown_result, result_limit))
+        self.result_label.configure(fg=theme.TEXT)
+
+        digit_count = len(full_result.lstrip("-"))
+        meta_parts = [f"十进制值 {shown_decimal}", f"结果 {digit_count} 位", f"{len(result.steps)} 个步骤"]
         if result.is_negative:
             meta_parts.append("负数按绝对值演算，符号单独保留")
-        self.meta_var.set("  ·  ".join(meta_parts))
+        if len(full_result) > 120:
+            meta_parts.append("超长结果仅显示前 120 位，复制可得完整值")
+        self.meta_var.set(self._hard_wrap_tokens("  ·  ".join(meta_parts), result_limit))
 
         self.copy_button.set_enabled(True)
+        self.copy_expr_button.set_enabled(True)
         self.step_count_var.set(f"共 {len(result.steps)} 步 · 详细演算")
+        render_started = time.perf_counter()
         self._render_steps(result)
+        render_ms = (time.perf_counter() - render_started) * 1000
         self.steps.scroll_to_top()
         self.status_dot_canvas.itemconfigure(self.status_dot, fill=theme.GREEN)
-        if not silent:
-            self.status_var.set(f"转换完成  ·  {elapsed_ms:.2f} ms")
+        if silent:
+            self.status_var.set(f"已实时更新  ·  {len(result.steps)} 个步骤  ·  按 Enter 重新转换")
+        elif calc_ms is None:
+            self.status_var.set("转换完成")
         else:
-            self.status_var.set("已实时更新  ·  按 Enter 可锁定结果")
+            # 同时展示计算与渲染耗时，避免“0.05 ms”误导用户。
+            self.status_var.set(
+                f"转换完成  ·  计算 {calc_ms:.2f} ms  ·  渲染 {render_ms:.0f} ms"
+            )
 
-    def _fit_result_font(self, text: str) -> None:
+    def _fit_result_font(self, text: str) -> int:
         length = len(text)
         if length <= 24:
             size = 31
@@ -652,6 +882,43 @@ class BaseConverterApp(tk.Tk):
         else:
             size = 12
         self.result_label.configure(font=theme.mono(size, "bold"))
+        return size
+
+    @staticmethod
+    def _label_char_limit(widget: tk.Misc, font: tuple, fallback_px: int = 900) -> int:
+        """估算某个 Label 每行能放多少个等宽字符，用于对超长数字主动换行。"""
+        try:
+            width = widget.winfo_width()
+        except tk.TclError:
+            width = 0
+        if width <= 50:
+            width = fallback_px
+        try:
+            char_width = max(1, tkfont.Font(font=font).measure("0"))
+        except tk.TclError:
+            char_width = 10
+        return max(12, int((width - 24) / char_width))
+
+    @staticmethod
+    def _hard_wrap_tokens(text: str, limit: int) -> str:
+        """在超长数字/字母串中插入换行，避免等宽 Label 把内容撑出卡片。
+
+        只拆分纯字母数字 token，中文、空格、括号等原样保留。
+        """
+        if limit < 8:
+            limit = 8
+
+        def wrap_token(token: str) -> str:
+            if len(token) <= limit:
+                return token
+            return "\n".join(
+                token[i : i + limit] for i in range(0, len(token), limit)
+            )
+
+        return "".join(
+            wrap_token(part) if part.isalnum() else part
+            for part in re.split(r"([0-9A-Za-z]+)", text)
+        )
 
     def _on_result_resize(self, event) -> None:
         wrap = max(280, event.width - 22)
@@ -659,15 +926,20 @@ class BaseConverterApp(tk.Tk):
         self.expression_label.configure(wraplength=wrap)
         self.meta_label.configure(wraplength=wrap)
 
-    def _show_error(self, message: str) -> None:
+    def _show_error(self, message: str, key: tuple[str, int, int] | None = None) -> None:
+        if key is not None:
+            self._last_state_key = key
         self.result = None
+        self._reset_copy_buttons()
         self.error_var.set(message)
+        self.error_label.configure(height=4)
         self.entry.configure(highlightbackground=theme.RED, highlightcolor=theme.RED)
         self.expression_var.set("等待有效输入")
         self.result_var.set("—")
         self.result_label.configure(fg=theme.MUTED, font=theme.mono(31, "bold"))
         self.meta_var.set("修正左侧输入后重新转换")
         self.copy_button.set_enabled(False)
+        self.copy_expr_button.set_enabled(False)
         self.step_count_var.set("0 步")
         self.steps.clear()
         self._render_message_card("暂时无法生成步骤", message, theme.RED, "!")
@@ -677,20 +949,67 @@ class BaseConverterApp(tk.Tk):
     def _copy_result(self) -> None:
         if self.result is None:
             return
+        self._copy_text(self.result.result_text, self.copy_button, "结果")
+
+    def _copy_expression(self) -> None:
+        if self.result is None:
+            return
+        self._copy_text(self.result.expression(), self.copy_expr_button, "表达式")
+
+    def _copy_text(self, text: str, button: RoundedButton, label: str) -> None:
         self.clipboard_clear()
-        self.clipboard_append(self.result.result_text)
-        self.copy_button.set_text("已复制 ✓")
-        self.status_var.set(f"已复制结果：{self.result.result_text}")
+        self.clipboard_append(text)
+        # 处理一次事件循环，让 Windows 剪贴板真正持有数据（避免立即关闭程序时丢失）。
+        self.update_idletasks()
+        button.set_text("已复制 ✓")
+        self.status_var.set(f"已复制{label}：{self._shorten(text)}")
         if self._toast_job is not None:
             try:
                 self.after_cancel(self._toast_job)
             except tk.TclError:
                 pass
-        self._toast_job = self.after(1800, self._reset_copy_button)
+        self._toast_job = self.after(1800, self._reset_copy_buttons)
+        # 复制后把焦点还给输入框，避免下一次按 Enter 又触发复制。
+        self.entry.focus_set()
 
-    def _reset_copy_button(self) -> None:
-        self._toast_job = None
-        self.copy_button.set_text("复制结果")
+    def _reset_copy_buttons(self) -> None:
+        if self._toast_job is not None:
+            try:
+                self.after_cancel(self._toast_job)
+            except tk.TclError:
+                pass
+            self._toast_job = None
+        if hasattr(self, "copy_button"):
+            self.copy_button.set_text("复制结果")
+        if hasattr(self, "copy_expr_button"):
+            self.copy_expr_button.set_text("复制表达式")
+
+    # ------------------------------------------------------------------ 清空
+    def _clear_input(self) -> None:
+        self._cancel_preview()
+        self.number_var.set("")
+        self.result = None
+        self._last_state_key = None
+        self.error_var.set("")
+        self.error_label.configure(height=1)
+        self.entry.configure(highlightbackground=theme.BORDER, highlightcolor=theme.ACCENT)
+        self.expression_var.set("等待输入")
+        self.result_var.set("—")
+        self.result_label.configure(fg=theme.MUTED, font=theme.mono(31, "bold"))
+        self.meta_var.set("输入数字后会自动预览，按 Enter 生成完整步骤")
+        self.copy_button.set_enabled(False)
+        self.copy_expr_button.set_enabled(False)
+        self.step_count_var.set("0 步")
+        self.steps.clear()
+        self._render_message_card(
+            "已清空输入",
+            "请输入一个整数，然后按 Enter 或点击「开始转换」。",
+            theme.PURPLE,
+            "i",
+        )
+        self.status_dot_canvas.itemconfigure(self.status_dot, fill=theme.GREEN)
+        self.status_var.set("已清空  ·  等待输入")
+        self.entry.focus_set()
 
     # ------------------------------------------------------------------ 步骤渲染
     def _render_steps(self, result: ConversionResult) -> None:
@@ -768,7 +1087,7 @@ class BaseConverterApp(tk.Tk):
             bg=theme.SURFACE,
             anchor="w",
             justify="left",
-            wraplength=640,
+            wraplength=520,
         ).pack(fill="x", pady=(10, 0))
 
     def _render_step_card(self, index: int, step: Step) -> None:
@@ -830,63 +1149,19 @@ class BaseConverterApp(tk.Tk):
         desc.pack(fill="x", pady=(4, 0))
 
         if step.headers and step.rows:
-            table = tk.Frame(
-                body,
-                bg=theme.SURFACE_2,
-                highlightbackground=theme.BORDER_SOFT,
-                highlightthickness=1,
+            try:
+                available_width = self.steps.canvas.winfo_width()
+            except tk.TclError:
+                available_width = 0
+            # 行数多，或窗口很窄放不下 6 列表格时，改用可滚动文本表格，避免横向被裁切。
+            use_text_table = len(step.rows) > MAX_GRID_ROWS or (
+                len(step.headers) >= 5 and 1 < available_width < 520
             )
-            table.pack(fill="x", pady=(12, 0))
-            for col in range(len(step.headers)):
-                table.grid_columnconfigure(col, weight=1, uniform="step-column")
-
-            # 数字特别长时，把长数字按固定宽度换行，避免表格撑出卡片。
-            chunked_rows = [
-                tuple(self._wrap_long_number(value) for value in row)
-                for row in step.rows
-            ]
-            longest = max(
-                (len(line) for row in chunked_rows for cell in row for line in cell.split("\n")),
-                default=0,
-            )
-            compact = longest > 12
-            cell_font = theme.mono(8) if compact else theme.mono(9)
-
-            header_bg = theme.SURFACE_3
-            for col, header in enumerate(step.headers):
-                tk.Label(
-                    table,
-                    text=header,
-                    font=theme.font(8, "bold"),
-                    fg=theme.TEXT_DIM,
-                    bg=header_bg,
-                    padx=5,
-                    pady=5,
-                ).grid(row=0, column=col, sticky="nsew")
-
-            for row_index, row in enumerate(chunked_rows, start=1):
-                is_final_division_row = (
-                    step.kind == "divide" and row_index == len(chunked_rows)
-                )
-                row_bg = theme.GREEN_DARK if is_final_division_row else (
-                    theme.SURFACE_2 if row_index % 2 else theme.BG_SOFT
-                )
-                row_fg = theme.GREEN if is_final_division_row else theme.TEXT
-                for col, value in enumerate(row):
-                    font = (
-                        theme.mono(8, "bold") if is_final_division_row and compact
-                        else theme.mono(9, "bold") if is_final_division_row
-                        else cell_font
-                    )
-                    tk.Label(
-                        table,
-                        text=value,
-                        font=font,
-                        fg=row_fg,
-                        bg=row_bg,
-                        padx=5,
-                        pady=4,
-                    ).grid(row=row_index, column=col, sticky="nsew")
+            if use_text_table:
+                # 行数很多时用单个 Text 控件渲染：保留全部数据，但不会卡住界面。
+                self._render_text_table(body, step)
+            else:
+                self._render_grid_table(body, step)
 
         formula_label = None
         if step.formula:
@@ -950,3 +1225,150 @@ class BaseConverterApp(tk.Tk):
                 footer.configure(wraplength=max(220, wrap - 90))
 
         body.bind("<Configure>", _on_body_configure)
+
+    # ------------------------------------------------------------------ 表格
+    def _render_grid_table(self, body: tk.Misc, step: Step) -> None:
+        """普通表格：行数不多时使用原生 Label 网格，排版最清晰。"""
+        table = tk.Frame(
+            body,
+            bg=theme.SURFACE_2,
+            highlightbackground=theme.BORDER_SOFT,
+            highlightthickness=1,
+        )
+        table.pack(fill="x", pady=(12, 0))
+        for col in range(len(step.headers)):
+            table.grid_columnconfigure(col, weight=1, uniform="step-column")
+
+        # 数字特别长时，把长数字按固定宽度换行，避免表格撑出卡片。
+        chunked_rows = [
+            tuple(self._wrap_long_number(value) for value in row)
+            for row in step.rows
+        ]
+        # 注意：要在换行前判断原始长度，否则 compact 永远为 False（旧实现的 bug）。
+        raw_longest = max(
+            (len(value) for row in step.rows for value in row),
+            default=0,
+        )
+        compact = raw_longest > 12
+        cell_font = theme.mono(8) if compact else theme.mono(9)
+
+        header_bg = theme.SURFACE_3
+        for col, header in enumerate(step.headers):
+            tk.Label(
+                table,
+                text=header,
+                font=theme.font(8, "bold"),
+                fg=theme.TEXT_DIM,
+                bg=header_bg,
+                padx=5,
+                pady=5,
+            ).grid(row=0, column=col, sticky="nsew")
+
+        for row_index, row in enumerate(chunked_rows, start=1):
+            is_final_division_row = (
+                step.kind == "divide" and row_index == len(chunked_rows)
+            )
+            row_bg = theme.GREEN_DARK if is_final_division_row else (
+                theme.SURFACE_2 if row_index % 2 else theme.BG_SOFT
+            )
+            row_fg = theme.GREEN if is_final_division_row else theme.TEXT
+            for col, value in enumerate(row):
+                font = (
+                    theme.mono(8, "bold") if is_final_division_row and compact
+                    else theme.mono(9, "bold") if is_final_division_row
+                    else cell_font
+                )
+                tk.Label(
+                    table,
+                    text=value,
+                    font=font,
+                    fg=row_fg,
+                    bg=row_bg,
+                    padx=5,
+                    pady=4,
+                ).grid(row=row_index, column=col, sticky="nsew")
+
+    def _render_text_table(self, body: tk.Misc, step: Step) -> None:
+        """紧凑文本表格：几十到几百行时只创建一个 Text，渲染快且可滚动看全量数据。"""
+        box = tk.Frame(
+            body,
+            bg=theme.SURFACE_2,
+            highlightbackground=theme.BORDER_SOFT,
+            highlightthickness=1,
+        )
+        box.pack(fill="x", pady=(12, 0))
+        tk.Label(
+            box,
+            text=f"共 {len(step.rows)} 行 · 为保证流畅，使用可滚动的紧凑表格",
+            font=theme.font(8),
+            fg=theme.MUTED,
+            bg=theme.SURFACE_2,
+            anchor="w",
+        ).pack(fill="x", padx=9, pady=(6, 0))
+
+        wrap = tk.Frame(box, bg=theme.SURFACE_2)
+        wrap.pack(fill="x", padx=1, pady=(4, 1))
+        wrap.grid_columnconfigure(0, weight=1)
+        wrap.grid_rowconfigure(0, weight=1)
+
+        text = tk.Text(
+            wrap,
+            height=min(18, len(step.rows) + 2),
+            wrap="none",
+            font=theme.mono(9),
+            bg=theme.SURFACE_2,
+            fg=theme.TEXT,
+            relief="flat",
+            bd=0,
+            highlightthickness=0,
+            padx=8,
+            pady=6,
+            cursor="arrow",
+        )
+        y_scroll = ttk.Scrollbar(
+            wrap, orient="vertical", command=text.yview, style="Dark.Vertical.TScrollbar"
+        )
+        x_scroll = ttk.Scrollbar(wrap, orient="horizontal", command=text.xview)
+        text.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
+        text.grid(row=0, column=0, sticky="nsew")
+        y_scroll.grid(row=0, column=1, sticky="ns")
+        x_scroll.grid(row=1, column=0, sticky="ew")
+
+        def cell(value: str) -> str:
+            return value.replace("\n", " ")
+
+        widths: list[int] = []
+        for col, header in enumerate(step.headers):
+            max_len = len(header)
+            for row in step.rows:
+                if col < len(row):
+                    max_len = max(max_len, min(len(cell(row[col])), 32))
+            widths.append(min(max_len, 32))
+
+        def fmt(value: str, width: int) -> str:
+            raw = cell(value)
+            if len(raw) >= width:
+                return raw  # 超长数值不截断，靠横向滚动条查看
+            return raw.center(width)
+
+        text.insert("end", "  ".join(fmt(h, w) for h, w in zip(step.headers, widths)) + "\n")
+        text.tag_add("head", "1.0", "1.end")
+        text.insert("end", "─" * min(160, sum(widths) + 2 * (len(widths) - 1)) + "\n")
+
+        for index, row in enumerate(step.rows):
+            line = "  ".join(fmt(value, width) for value, width in zip(row, widths))
+            start = text.index("end-1c")
+            text.insert("end", line + "\n")
+            if step.kind == "divide" and index == len(step.rows) - 1:
+                text.tag_add(
+                    "final", start, f"{start} lineend"
+                )
+        text.tag_configure("head", foreground=theme.TEXT_DIM, font=theme.mono(9, "bold"))
+        text.tag_configure(
+            "final",
+            foreground=theme.GREEN,
+            background=theme.GREEN_DARK,
+            font=theme.mono(9, "bold"),
+        )
+        text.configure(state="disabled")
+
