@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 *.pyo
 *$py.class
+*.log
 
 # 虚拟环境
 .venv/
@@ -15,5 +16,7 @@ env/
 .DS_Store
 Thumbs.db
 
-# 运行输出
-*.log
+# 打包中间产物（build/ 下的配置与脚本需要提交）
+build/dist/
+build/work/
+*.spec.bak
