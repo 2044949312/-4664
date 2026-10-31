@@ -5,7 +5,6 @@ from __future__ import annotations
 import re
 import time
 import tkinter as tk
-from tkinter import ttk
 
 from . import theme
 from .converter import (
@@ -19,7 +18,7 @@ from .converter import (
     build_conversion,
     build_quick_examples,
 )
-from .widgets import RoundedButton, ScrollableFrame, _rounded_points, divider
+from .widgets import BasePickerButton, RoundedButton, ScrollableFrame, _rounded_points, divider
 
 
 class BaseConverterApp(tk.Tk):
@@ -43,11 +42,10 @@ class BaseConverterApp(tk.Tk):
         self._set_window_icon()
 
         # 数据状态
-        self._base_labels = [self._base_label(base) for base in range(MIN_BASE, MAX_BASE + 1)]
-        self._base_by_label = {label: base for label, base in zip(self._base_labels, range(MIN_BASE, MAX_BASE + 1))}
+        self._base_options = [
+            (base, base_name(base)) for base in range(MIN_BASE, MAX_BASE + 1)
+        ]
         self.number_var = tk.StringVar(value="255")
-        self.source_var = tk.StringVar(value=self._base_label(10))
-        self.target_var = tk.StringVar(value=self._base_label(2))
         self.error_var = tk.StringVar(value="")
         self.expression_var = tk.StringVar(value="等待输入")
         self.result_var = tk.StringVar(value="—")
@@ -60,7 +58,6 @@ class BaseConverterApp(tk.Tk):
         self._toast_job: str | None = None
         self._last_elapsed_ms: float = 0.0
 
-        self._configure_styles()
         self._build_ui()
         self._bind_shortcuts()
 
@@ -87,43 +84,6 @@ class BaseConverterApp(tk.Tk):
         image.put(theme.ACCENT_BRIGHT, to=(3, 18, 6, 24))
         self.iconphoto(True, image)
         self._icon_image = image  # 防止被垃圾回收
-
-    def _base_label(self, base: int) -> str:
-        return f"{base} · {base_name(base)}"
-
-    def _configure_styles(self) -> None:
-        style = ttk.Style(self)
-        try:
-            style.theme_use("clam")
-        except tk.TclError:
-            pass
-        style.configure(
-            "Dark.TCombobox",
-            fieldbackground=theme.SURFACE_2,
-            background=theme.SURFACE_2,
-            foreground=theme.TEXT,
-            arrowcolor=theme.ACCENT,
-            bordercolor=theme.BORDER,
-            lightcolor=theme.SURFACE_2,
-            darkcolor=theme.SURFACE_2,
-            padding=(8, 7),
-            arrowsize=13,
-            font=theme.font(10),
-        )
-        style.map(
-            "Dark.TCombobox",
-            fieldbackground=[("readonly", theme.SURFACE_2), ("disabled", theme.SURFACE_2)],
-            foreground=[("readonly", theme.TEXT), ("disabled", theme.MUTED)],
-            selectbackground=[("readonly", theme.SURFACE_2)],
-            selectforeground=[("readonly", theme.TEXT)],
-            bordercolor=[("focus", theme.ACCENT)],
-        )
-        # 下拉列表（Listbox）的配色不能通过 ttk.Style 设置，需要用 option database。
-        self.option_add("*TCombobox*Listbox.background", theme.SURFACE_2)
-        self.option_add("*TCombobox*Listbox.foreground", theme.TEXT)
-        self.option_add("*TCombobox*Listbox.selectBackground", theme.ACCENT_SOFT)
-        self.option_add("*TCombobox*Listbox.selectForeground", theme.ACCENT_BRIGHT)
-        self.option_add("*TCombobox*Listbox.font", "Microsoft YaHei UI 10")
 
     def _bind_shortcuts(self) -> None:
         self.bind("<Return>", self.convert)
@@ -297,17 +257,15 @@ class BaseConverterApp(tk.Tk):
             anchor="w",
         ).grid(row=0, column=2, sticky="w", padx=(8, 0))
 
-        self.source_combo = ttk.Combobox(
+        self.source_picker = BasePickerButton(
             selector,
-            textvariable=self.source_var,
-            values=self._base_labels,
-            state="readonly",
-            style="Dark.TCombobox",
-            font=theme.font(10),
-            width=10,
+            base=10,
+            options=self._base_options,
+            on_select=self._on_base_changed,
+            title="选择源进制",
+            height=38,
         )
-        self.source_combo.grid(row=1, column=0, sticky="ew", padx=(0, 8), pady=(6, 0))
-        self.source_combo.bind("<<ComboboxSelected>>", self._on_base_changed)
+        self.source_picker.grid(row=1, column=0, sticky="ew", padx=(0, 8), pady=(6, 0))
 
         swap_btn = RoundedButton(
             selector,
@@ -325,17 +283,15 @@ class BaseConverterApp(tk.Tk):
         )
         swap_btn.grid(row=1, column=1, pady=(6, 0))
 
-        self.target_combo = ttk.Combobox(
+        self.target_picker = BasePickerButton(
             selector,
-            textvariable=self.target_var,
-            values=self._base_labels,
-            state="readonly",
-            style="Dark.TCombobox",
-            font=theme.font(10),
-            width=10,
+            base=2,
+            options=self._base_options,
+            on_select=self._on_base_changed,
+            title="选择目标进制",
+            height=38,
         )
-        self.target_combo.grid(row=1, column=2, sticky="ew", padx=(8, 0), pady=(6, 0))
-        self.target_combo.bind("<<ComboboxSelected>>", self._on_base_changed)
+        self.target_picker.grid(row=1, column=2, sticky="ew", padx=(8, 0), pady=(6, 0))
 
         self.convert_button = RoundedButton(
             inner,
@@ -618,13 +574,11 @@ class BaseConverterApp(tk.Tk):
         self._apply_result(result, silent=True)
 
     def _selected_bases(self) -> tuple[int, int]:
-        source = self._base_by_label.get(self.source_var.get(), 10)
-        target = self._base_by_label.get(self.target_var.get(), 2)
-        return source, target
+        return self.source_picker.get_base(), self.target_picker.get_base()
 
     def _set_bases(self, source_base: int, target_base: int) -> None:
-        self.source_var.set(self._base_label(source_base))
-        self.target_var.set(self._base_label(target_base))
+        self.source_picker.set_base(source_base)
+        self.target_picker.set_base(target_base)
 
     def _swap_bases(self) -> None:
         source, target = self._selected_bases()

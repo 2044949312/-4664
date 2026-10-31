@@ -195,6 +195,215 @@ class RoundedButton(tk.Canvas):
         self._refresh_fill()
 
 
+class BasePickerButton(RoundedButton):
+    """显示当前进制的按钮，点击后弹出一个 2–36 进制的选择面板。"""
+
+    def __init__(
+        self,
+        parent: tk.Misc,
+        *,
+        base: int,
+        options: list[tuple[int, str]],
+        on_select,
+        title: str,
+        height: int = 38,
+    ) -> None:
+        self._base = base
+        self._base_choices = list(options)
+        self._on_select = on_select
+        self._title = title
+        self._popup: tk.Toplevel | None = None
+        self._name_by_base = {value: name for value, name in self._base_choices}
+        super().__init__(
+            parent,
+            text=self._button_text(),
+            command=self._toggle_popup,
+            fill=theme.SURFACE_2,
+            hover_fill=theme.SURFACE_3,
+            text_color=theme.TEXT,
+            height=height,
+            radius=9,
+            font=theme.font(10),
+            border=theme.BORDER_SOFT,
+        )
+
+    def _button_text(self) -> str:
+        return f"{self._base} · {self._name_by_base.get(self._base, '')}   ▾"
+
+    def get_base(self) -> int:
+        return self._base
+
+    def set_base(self, base: int) -> None:
+        if base == self._base:
+            return
+        self._base = base
+        self.set_text(self._button_text())
+        if self._popup is not None:
+            self._close_popup()
+
+    def _toggle_popup(self) -> None:
+        if self._popup is not None:
+            self._close_popup()
+        else:
+            self._open_popup()
+
+    def _open_popup(self) -> None:
+        self._close_popup()
+        self.update_idletasks()
+
+        popup = tk.Toplevel(self)
+        popup.withdraw()
+        popup.overrideredirect(True)
+        popup.attributes("-topmost", True)
+        self._popup = popup
+
+        outer = tk.Frame(popup, bg=theme.BORDER)
+        outer.pack(fill="both", expand=True)
+        panel = tk.Frame(outer, bg=theme.SURFACE, padx=12, pady=10)
+        panel.pack(fill="both", expand=True, padx=1, pady=1)
+
+        header = tk.Frame(panel, bg=theme.SURFACE)
+        header.grid(row=0, column=0, columnspan=5, sticky="ew", pady=(0, 8))
+        header.grid_columnconfigure(0, weight=1)
+        tk.Label(
+            header,
+            text=self._title,
+            font=theme.font(10, "bold"),
+            fg=theme.TEXT,
+            bg=theme.SURFACE,
+            anchor="w",
+        ).grid(row=0, column=0, sticky="w")
+        tk.Label(
+            header,
+            text="2–36 进制",
+            font=theme.font(8),
+            fg=theme.MUTED,
+            bg=theme.SURFACE,
+            anchor="e",
+        ).grid(row=0, column=1, sticky="e", padx=(8, 6))
+        tk.Button(
+            header,
+            text="✕",
+            command=self._close_popup,
+            font=theme.font(9, "bold"),
+            fg=theme.MUTED,
+            bg=theme.SURFACE,
+            activebackground=theme.SURFACE_2,
+            activeforeground=theme.RED,
+            relief="flat",
+            bd=0,
+            padx=4,
+            pady=0,
+            cursor="hand2",
+            highlightthickness=0,
+        ).grid(row=0, column=2, sticky="e")
+
+        body = tk.Frame(panel, bg=theme.SURFACE)
+        body.grid(row=1, column=0, columnspan=5, sticky="nsew")
+        for col in range(5):
+            body.grid_columnconfigure(col, weight=1, uniform="base-option")
+        for index, (value, name) in enumerate(self._base_choices):
+            row, col = divmod(index, 5)
+            selected = value == self._base
+            common = value in (2, 8, 10, 16)
+            if name.startswith(f"{value} "):
+                option_text = name
+            else:
+                option_text = f"{value:>2}  {name}"
+            button = tk.Button(
+                body,
+                text=option_text,
+                command=lambda chosen=value: self._choose(chosen),
+                font=theme.font(9, "bold" if selected else "normal"),
+                fg=theme.ACCENT_BRIGHT if selected else (theme.ACCENT if common else theme.TEXT),
+                bg=theme.ACCENT_SOFT if selected else theme.SURFACE_2,
+                activebackground=theme.ACCENT_DARK,
+                activeforeground=theme.ACCENT_BRIGHT,
+                relief="flat",
+                bd=0,
+                padx=7,
+                pady=6,
+                anchor="w",
+                cursor="hand2",
+                highlightthickness=0,
+            )
+            button.grid(row=row, column=col, sticky="ew", padx=2, pady=2)
+
+        tk.Label(
+            panel,
+            text="点击任意进制切换 · Esc 关闭",
+            font=theme.font(8),
+            fg=theme.MUTED,
+            bg=theme.SURFACE,
+            anchor="w",
+        ).grid(row=2, column=0, columnspan=5, sticky="w", pady=(7, 0))
+
+        popup.update_idletasks()
+        width = max(popup.winfo_reqwidth(), 540)
+        height = popup.winfo_reqheight()
+        screen_w = popup.winfo_screenwidth()
+        screen_h = popup.winfo_screenheight()
+        x = self.winfo_rootx()
+        y = self.winfo_rooty() + self.winfo_height() + 6
+        if x + width > screen_w - 8:
+            x = max(8, screen_w - width - 8)
+        if y + height > screen_h - 8:
+            y = max(8, self.winfo_rooty() - height - 6)
+        popup.geometry(f"{width}x{height}+{x}+{y}")
+        popup.deiconify()
+        popup.lift()
+        popup.focus_set()
+        popup.grab_set()
+
+        popup.bind("<Escape>", lambda _event: self._close_popup())
+        popup.bind("<Button-1>", self._on_popup_click)
+        popup.bind("<FocusOut>", self._on_popup_focus_out)
+
+    def _on_popup_click(self, event) -> None:
+        popup = self._popup
+        if popup is None:
+            return
+        if event.widget is popup:
+            width = popup.winfo_width()
+            height = popup.winfo_height()
+            if not (0 <= event.x < width and 0 <= event.y < height):
+                self._close_popup()
+
+    def _on_popup_focus_out(self, event) -> None:
+        popup = self._popup
+        if popup is None or event.widget is not popup:
+            return
+        popup.after(30, self._close_if_focus_left)
+
+    def _close_if_focus_left(self) -> None:
+        popup = self._popup
+        if popup is None:
+            return
+        focus = popup.focus_get()
+        if focus is None or not str(focus).startswith(str(popup)):
+            self._close_popup()
+
+    def _choose(self, base: int) -> None:
+        self._close_popup()
+        self.set_base(base)
+        self.focus_set()
+        self._on_select()
+
+    def _close_popup(self) -> None:
+        popup = self._popup
+        if popup is None:
+            return
+        self._popup = None
+        try:
+            popup.grab_release()
+        except tk.TclError:
+            pass
+        try:
+            popup.destroy()
+        except tk.TclError:
+            pass
+
+
 class ScrollableFrame(tk.Frame):
     """带垂直滚动条的容器。
 
