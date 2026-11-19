@@ -94,6 +94,47 @@ class AppUiTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertNotIn("锁定", self.app.status_var.get())
 
+    def test_decimal_preview_and_cycle(self) -> None:
+        self._set("0.1", 10, 2)
+        self.app.convert()
+        self.app.update()
+
+        self.assertIsNotNone(self.app.result)
+        self.assertEqual(self.app.result.result_text, "0.0(0011)")
+        self.assertEqual(self.app.result_var.get(), "0.0(0011)")
+        self.assertIn("循环节", self.app.meta_var.get())
+        self.assertEqual(self.app.step_count_var.get(), "共 1 步 · 详细演算")
+
+        self._set("0.1(6)", 10, 16)
+        self.app.convert()
+        self.app.update()
+        self.assertEqual(self.app.result.result_text, "0.2(A)")
+        self.assertIn("循环小数", self.app.result.steps[0].title)
+
+    def test_fraction_invalid_digit_reports_position(self) -> None:
+        self._set("1.2", 2, 10)
+        self.app.convert()
+        self.app.update()
+
+        self.assertIsNone(self.app.result)
+        self.assertIn("不是 2 进制", self.app.error_var.get())
+        self.assertIn("第 3 位", self.app.error_var.get())
+
+    def test_swap_fraction_round_trip(self) -> None:
+        self._set("0.625", 10, 2)
+        self.app.convert()
+        self.app.update()
+
+        self.app._swap_bases()
+        self.app.update()
+
+        self.assertEqual(self.app.number_var.get(), "0.101")
+        self.assertEqual(
+            (self.app.source_picker.get_base(), self.app.target_picker.get_base()),
+            (2, 10),
+        )
+        self.assertEqual(self.app.result.result_text, "0.625")
+
     def test_swap_uses_current_input(self) -> None:
         self._set("255", 10, 2)
         self.app.convert()
@@ -108,15 +149,22 @@ class AppUiTests(unittest.TestCase):
         self.assertEqual(self.app.result.value, 256)
         self.assertEqual((self.app.source_picker.get_base(), self.app.target_picker.get_base()), (2, 10))
 
+    def _focus_target(self):
+        """返回当前焦点控件；窗口没有被系统激活时退回到 Tk 记录的焦点目标。"""
+        focused = self.app.focus_get()
+        if focused is None:
+            focused = self.app.focus_lastfor()
+        return focused
+
     def test_actions_return_focus_to_entry_and_copy_is_reachable(self) -> None:
         self._set("255", 10, 2)
         self.app.convert()
         self.app.update()
-        self.assertEqual(str(self.app.focus_get()), str(self.app.entry))
+        self.assertEqual(str(self._focus_target()), str(self.app.entry))
 
         self.app._copy_result()
         self.app.update()
-        self.assertEqual(str(self.app.focus_get()), str(self.app.entry))
+        self.assertEqual(str(self._focus_target()), str(self.app.entry))
 
         # 复制按钮在启用后应进入 Tab 顺序（takefocus=1）。
         self.assertEqual(str(self.app.copy_button.cget("takefocus")), "1")

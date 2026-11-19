@@ -30,6 +30,7 @@ GREEN_DARK = "#063D31"
 PURPLE = "#A78BFA"
 PURPLE_DARK = "#261E4D"
 AMBER = "#FBBF24"
+AMBER_DARK = "#3D2A05"
 RED = "#FB7185"
 RED_DARK = "#461523"
 
@@ -40,6 +41,7 @@ STEP_COLORS = {
     "info": (PURPLE, PURPLE_DARK),
     "expand": (ACCENT, ACCENT_DARK),
     "divide": (GREEN, GREEN_DARK),
+    "multiply": (AMBER, AMBER_DARK),
 }
 
 

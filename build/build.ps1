@@ -1,4 +1,4 @@
-# 进制转换演示器 · 一键打包脚本
+﻿# 进制转换演示器 · 一键打包脚本
 # 用法（项目根目录）：
 #   powershell -ExecutionPolicy Bypass -File build\build.ps1
 # 可选：先安装 PyInstaller
@@ -10,13 +10,18 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
+# Windows 上 python 可能只是应用商店占位程序，优先使用 py 启动器。
+$Python = "python"
+if (Get-Command py -ErrorAction SilentlyContinue) {
+    $Python = "py"
+}
 Push-Location $ProjectRoot
 try {
     if ($InstallPyInstaller) {
-        python -m pip install --upgrade pyinstaller
+        & $Python -m pip install --upgrade pyinstaller
     }
 
-    python -m PyInstaller `
+    & $Python -m PyInstaller `
         --noconfirm `
         --clean `
         (Join-Path $PSScriptRoot "BaseConverterDir.spec") `
