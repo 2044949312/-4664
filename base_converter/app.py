@@ -15,6 +15,7 @@ from tkinter import messagebox, ttk
 from . import theme
 from .converter import (
     MAX_BASE,
+    MAX_FRACTION_OUTPUT_DIGITS,
     MAX_INPUT_DIGITS,
     MIN_BASE,
     ConversionError,
@@ -26,7 +27,7 @@ from .converter import (
 )
 from .widgets import BasePickerButton, RoundedButton, ScrollableFrame, _rounded_points, divider
 
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 
 # 超过该行数后，步骤表格改用单个只读 Text 控件渲染：
 # 这样即使 96 位输入产生数百行，也不会因为创建上千个 Label 而冻结界面。
@@ -63,7 +64,7 @@ class BaseConverterApp(tk.Tk):
         self.error_var = tk.StringVar(value="")
         self.expression_var = tk.StringVar(value="等待输入")
         self.result_var = tk.StringVar(value="—")
-        self.meta_var = tk.StringVar(value="选择源进制与目标进制，再输入整数")
+        self.meta_var = tk.StringVar(value="选择源进制与目标进制，再输入整数或小数")
         self.status_var = tk.StringVar(value="就绪 · 输入数字后按 Enter 快速转换")
         self.step_count_var = tk.StringVar(value="0 步")
 
@@ -170,6 +171,18 @@ class BaseConverterApp(tk.Tk):
         if len(text) <= limit:
             return text
         return text[: limit - 1] + "…"
+
+    def destroy(self) -> None:
+        # 取消尚未触发的 after 回调，避免窗口销毁后 Tcl 再调用已删除的 Python 命令。
+        for job in (self._preview_job, self._toast_job):
+            if job is not None:
+                try:
+                    self.after_cancel(job)
+                except tk.TclError:
+                    pass
+        self._preview_job = None
+        self._toast_job = None
+        super().destroy()
 
     def _set_window_icon(self) -> None:
         """用 PhotoImage 画一个简单的双向箭头图标，避免依赖外部图片。"""
@@ -290,7 +303,7 @@ class BaseConverterApp(tk.Tk):
         ).pack(side="left")
         tk.Label(
             title_row,
-            text="整数",
+            text="整数 / 小数",
             font=theme.font(8, "bold"),
             fg=theme.ACCENT,
             bg=theme.ACCENT_SOFT,
@@ -501,7 +514,11 @@ class BaseConverterApp(tk.Tk):
         hint_box.pack(fill="x")
         tk.Label(
             hint_box,
-            text="0b1010  二进制     0o17  八进制\n0x1F  十六进制     A–Z  表示 10–35",
+            text=(
+                "0b1010  二进制     0o17  八进制\n"
+                "0x1F  十六进制     A–Z  表示 10–35\n"
+                "3.14  小数         0.1(6)  循环节"
+            ),
             font=theme.mono(8),
             fg=theme.TEXT_DIM,
             bg=theme.BG_SOFT,
@@ -510,7 +527,10 @@ class BaseConverterApp(tk.Tk):
         ).pack(anchor="w")
         tk.Label(
             hint_box,
-            text=f"{MIN_BASE}–{MAX_BASE} 进制  ·  最多 {MAX_INPUT_DIGITS} 位  ·  仅演示整数",
+            text=(
+                f"{MIN_BASE}–{MAX_BASE} 进制  ·  最多 {MAX_INPUT_DIGITS} 位  ·  "
+                "支持有限小数与循环小数"
+            ),
             font=theme.font(8),
             fg=theme.MUTED,
             bg=theme.BG_SOFT,
@@ -650,6 +670,7 @@ class BaseConverterApp(tk.Tk):
         for color, label in (
             (theme.ACCENT, "按权展开"),
             (theme.GREEN, "除基取余"),
+            (theme.AMBER, "乘基取整"),
             (theme.PURPLE, "说明"),
         ):
             dot = tk.Canvas(legend, width=8, height=8, bg=theme.BG, highlightthickness=0)
@@ -709,9 +730,12 @@ class BaseConverterApp(tk.Tk):
 
     def _on_number_changed(self, *_args) -> None:
         if self.number_var.get().strip():
-            self.hint_var.set("支持 A–Z 数码、空格/下划线、0b/0o/0x 前缀；仅演示整数")
+            self.hint_var.set(
+                "支持小数与循环节（如 3.14、0.1(6)）；另支持 A–Z 数码、"
+                "空格/下划线、0b/0o/0x 前缀"
+            )
         else:
-            self.hint_var.set("输入整数，例如 255、FF、1010、-1010")
+            self.hint_var.set("输入整数或小数，例如 255、3.14、FF、0.1(6)")
 
     def _on_base_changed(self, _event=None) -> None:
         self.entry.focus_set()
@@ -761,7 +785,8 @@ class BaseConverterApp(tk.Tk):
             current = build_conversion(self.number_var.get(), source, target)
         except ConversionError:
             current = None
-        if current is not None:
+        # 小数循环节过长而被截断时，回填的文本不是完整数值，不能拿去做往返验证。
+        if current is not None and not current.target_truncated:
             self.number_var.set(current.result_text)
         self._set_bases(target, source)
         self.convert()
@@ -844,7 +869,23 @@ class BaseConverterApp(tk.Tk):
         self.result_label.configure(fg=theme.TEXT)
 
         digit_count = len(full_result.lstrip("-"))
-        meta_parts = [f"十进制值 {shown_decimal}", f"结果 {digit_count} 位", f"{len(result.steps)} 个步骤"]
+        if result.is_fraction:
+            size_text = f"结果 {len(result.target_integer_digits)} 位整数"
+            if result.target_fraction_digits:
+                size_text += f" + {len(result.target_fraction_digits)} 位小数"
+            if result.target_repeat_digits:
+                size_text += f" + {len(result.target_repeat_digits)} 位循环节"
+        else:
+            size_text = f"结果 {digit_count} 位"
+        meta_parts = [f"十进制值 {shown_decimal}", size_text, f"{len(result.steps)} 个步骤"]
+        if result.is_repeating:
+            repeat = result.target_repeat_digits
+            shown_repeat = repeat if len(repeat) <= 20 else repeat[:19] + "…"
+            meta_parts.append(f"循环节 {shown_repeat}（括号内数码无限重复）")
+        if result.target_truncated:
+            meta_parts.append(
+                f"小数部分超过 {MAX_FRACTION_OUTPUT_DIGITS} 位，已截断显示"
+            )
         if result.is_negative:
             meta_parts.append("负数按绝对值演算，符号单独保留")
         if len(full_result) > 120:
@@ -1003,7 +1044,8 @@ class BaseConverterApp(tk.Tk):
         self.steps.clear()
         self._render_message_card(
             "已清空输入",
-            "请输入一个整数，然后按 Enter 或点击「开始转换」。",
+            "请输入一个整数或小数，例如 255、3.14、0.1(6)，"
+            "然后按 Enter 或点击「开始转换」。",
             theme.PURPLE,
             "i",
         )

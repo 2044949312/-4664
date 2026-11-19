@@ -12,6 +12,7 @@ import subprocess
 import sys
 import unicodedata
 import unittest
+from fractions import Fraction
 from pathlib import Path
 
 # 允许直接运行 tests/test_converter.py，也允许从项目根目录运行 unittest。
@@ -23,6 +24,7 @@ from base_converter.converter import (  # noqa: E402
     BASE_NAMES,
     DIGITS,
     MAX_BASE,
+    MAX_FRACTION_OUTPUT_DIGITS,
     MAX_INPUT_DIGITS,
     MIN_BASE,
     ConversionError,
@@ -30,9 +32,12 @@ from base_converter.converter import (  # noqa: E402
     base_name,
     build_conversion,
     build_quick_examples,
+    expand_fraction,
     int_to_base,
+    parse_decimal,
     parse_number,
     validate_base,
+    value_to_text,
 )
 
 
@@ -104,6 +109,41 @@ class IntToBaseTests(unittest.TestCase):
         value = 2**100 + 12345
         self.assertEqual(int_to_base(value, 2), bin(value)[2:].upper())
         self.assertEqual(int_to_base(value, 16), format(value, "X"))
+
+
+class FractionHelperTests(unittest.TestCase):
+    """小数展开与格式化的底层函数。"""
+
+    def test_expand_terminating(self):
+        expansion = expand_fraction(Fraction(5, 8), 2)
+        self.assertEqual(expansion.digits, "101")
+        self.assertEqual(expansion.repeat, "")
+        self.assertFalse(expansion.truncated)
+        self.assertEqual(len(expansion.steps), 3)
+
+    def test_expand_cycle(self):
+        expansion = expand_fraction(Fraction(1, 10), 2)
+        self.assertEqual(expansion.digits, "0")
+        self.assertEqual(expansion.repeat, "0011")
+        self.assertTrue(expansion.is_repeating)
+        self.assertEqual(expansion.text(), "0(0011)")
+
+    def test_expand_truncated(self):
+        expansion = expand_fraction(Fraction(1, 97), 10, max_digits=8)
+        self.assertTrue(expansion.truncated)
+        self.assertEqual(len(expansion.digits), 8)
+        self.assertTrue(expansion.text().endswith("…"))
+
+    def test_expand_rejects_out_of_range(self):
+        for value in (Fraction(-1, 2), Fraction(1), Fraction(3, 2)):
+            with self.assertRaises(ValueError):
+                expand_fraction(value, 10)
+
+    def test_value_to_text(self):
+        self.assertEqual(value_to_text(Fraction(255), 16), "FF")
+        self.assertEqual(value_to_text(Fraction(-5, 2), 2), "-10.1")
+        self.assertEqual(value_to_text(Fraction(1, 3), 10), "0.(3)")
+        self.assertEqual(value_to_text(Fraction(1, 10), 2), "0.0(0011)")
 
 
 class BuildConversionTests(unittest.TestCase):
@@ -268,38 +308,284 @@ class PrefixMismatchTests(unittest.TestCase):
             build_conversion("0b1010", 16, 2)
 
 
-class DecimalRejectionTests(unittest.TestCase):
-    """P1-6：只演示整数，出现小数要明确报错。"""
+class DecimalParsingTests(unittest.TestCase):
+    """小数与循环节的解析：值必须精确，规范化写法必须去掉多余零。"""
 
-    DECIMAL_MESSAGE = "当前版本只演示整数，不支持小数部分（例如 3.14）。"
-
-    def test_ascii_dot(self):
-        with self.assertRaises(ConversionError) as ctx:
-            parse_number("3.14", 10)
-        self.assertEqual(ctx.exception.message, self.DECIMAL_MESSAGE)
-
-    def test_chinese_marks(self):
-        for text in ("3。14", "3·14"):
+    def test_simple_decimals(self):
+        cases = {
+            "3.14": Fraction(157, 50),
+            ".5": Fraction(1, 2),
+            "0.500": Fraction(1, 2),
+            "-0.5": Fraction(-1, 2),
+            "+0.25": Fraction(1, 4),
+            "0x1.8": Fraction(3, 2),
+            "0b0.1": Fraction(1, 2),
+            "0o7.4": Fraction(15, 2),
+        }
+        for text, expected in cases.items():
             with self.subTest(text=text):
-                with self.assertRaises(ConversionError) as ctx:
-                    parse_number(text, 10)
-                self.assertEqual(ctx.exception.message, self.DECIMAL_MESSAGE)
+                base = 16 if text.startswith("0x") else 2 if text.startswith("0b") else 8 if text.startswith("0o") else 10
+                self.assertEqual(parse_decimal(text, base).value, expected)
 
-    def test_fullwidth_dot_normalized(self):
-        with self.assertRaises(ConversionError) as ctx:
-            parse_number("３．１４", 10)
-        self.assertEqual(ctx.exception.message, self.DECIMAL_MESSAGE)
+    def test_chinese_and_fullwidth_dot(self):
+        for text in ("3。14", "3·14", "３．１４"):
+            with self.subTest(text=text):
+                self.assertEqual(parse_decimal(text, 10).value, Fraction(157, 50))
 
-    def test_other_bases_also_reject_decimals(self):
-        for text, base in (("F.F", 16), ("1.0", 2), ("7.7", 8)):
+    def test_repeating_notation(self):
+        cases = {
+            "0.(3)": Fraction(1, 3),
+            "0.1(6)": Fraction(1, 6),
+            "1.2(34)": Fraction(611, 495),
+            "-0.(6)": Fraction(-2, 3),
+        }
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(parse_decimal(text, 10).value, expected)
+
+    def test_normalized_removes_extra_zeros(self):
+        self.assertEqual(parse_decimal("00.500", 10).normalized, "0.5")
+        self.assertEqual(parse_decimal("3.1400", 10).normalized, "3.14")
+        self.assertEqual(parse_decimal("0.1(0)", 10).normalized, "0.1")
+        self.assertEqual(parse_decimal("000FF", 16).normalized, "FF")
+
+    def test_normalized_keeps_cycle(self):
+        self.assertEqual(parse_decimal("0.(3)", 10).normalized, "0.(3)")
+        self.assertEqual(parse_decimal("0.10(3)", 10).normalized, "0.10(3)")
+        self.assertEqual(parse_decimal("0.0(0011)", 2).normalized, "0.0(0011)")
+
+    def test_repeating_all_nines_carries_to_integer(self):
+        for text, base in (("0.(9)", 10), ("0.(1)", 2)):
             with self.subTest(text=text, base=base):
-                with self.assertRaises(ConversionError) as ctx:
-                    parse_number(text, base)
-                self.assertIn("只演示整数", ctx.exception.message)
+                parsed = parse_decimal(text, base)
+                self.assertEqual(parsed.value, 1)
+                self.assertEqual(parsed.normalized, "1")
+                self.assertEqual(parsed.integer_digits, "1")
+                self.assertEqual(parsed.fraction_digits, "")
 
-    def test_build_conversion_also_rejects(self):
-        with self.assertRaises(ConversionError):
-            build_conversion("1.5", 10, 2)
+    def test_fraction_parts_are_exposed(self):
+        parsed = parse_decimal("A.8", 16)
+        self.assertEqual(parsed.integer_digits, "A")
+        self.assertEqual(parsed.fraction_digits, "8")
+        self.assertEqual(parsed.repeat_digits, "")
+        self.assertTrue(parsed.has_fraction)
+        self.assertEqual(parsed.fraction_text, "8")
+
+        parsed = parse_decimal("0.1(6)", 10)
+        self.assertEqual(parsed.fraction_digits, "1")
+        self.assertEqual(parsed.repeat_digits, "6")
+        self.assertEqual(parsed.fraction_text, "1(6)")
+
+    def test_mixed_spaces_and_underscores(self):
+        self.assertEqual(parse_decimal("3 . 1 4", 10).value, Fraction(157, 50))
+        self.assertEqual(parse_decimal("F_F.8_0", 16).value, Fraction(511, 2))
+        self.assertEqual(parse_decimal("0.1_0(6)", 10).value, Fraction(8, 75))
+
+    def test_legacy_parse_number_still_works(self):
+        value, normalized, digits = parse_number("000FF", 16)
+        self.assertEqual(value, 255)
+        self.assertEqual(normalized, "FF")
+        self.assertEqual(digits, "FF")
+        value, normalized, digits = parse_number("0.625", 10)
+        self.assertEqual(value, Fraction(5, 8))
+        self.assertEqual(normalized, "0.625")
+        self.assertEqual(digits, "0")
+
+
+class DecimalErrorTests(unittest.TestCase):
+    """小数与循环节的错误提示要具体、可定位。"""
+
+    def assert_message(self, text: str, base: int, fragment: str):
+        with self.assertRaises(ConversionError) as ctx:
+            parse_decimal(text, base)
+        self.assertIn(fragment, ctx.exception.message)
+
+    def test_multiple_dots(self):
+        self.assert_message("3.1.4", 10, "小数点只能有一个")
+
+    def test_empty_fraction(self):
+        self.assert_message("3.", 10, "小数点后面还需要数字")
+        self.assert_message(".", 10, "小数点前后至少需要一位数字")
+
+    def test_unclosed_or_empty_cycle(self):
+        self.assert_message("0.(3", 10, "循环节要用一对括号")
+        self.assert_message("0.3)", 10, "循环节要用一对括号")
+        self.assert_message("0.1()", 10, "循环节括号里至少需要一位数码")
+
+    def test_cycle_position_rules(self):
+        self.assert_message("3(3)", 10, "循环节括号必须写在小数点之后")
+        self.assert_message("0.1(2)3", 10, "循环节括号要写在数字末尾")
+        self.assert_message("0.1(2)(3)", 10, "循环节要用一对括号")
+
+    def test_invalid_digit_in_fraction(self):
+        self.assert_message("0.1G", 16, "“G” 不是 16 进制")
+        self.assertIn("位置：第 4 位", self._message("0.1G", 16))
+        self.assertIn("位置：第 6 位", self._message("1.1012", 2))
+        self.assertIn("位置：第 6 位", self._message("0.1(2G)", 16))
+
+    def _message(self, text: str, base: int) -> str:
+        with self.assertRaises(ConversionError) as ctx:
+            parse_decimal(text, base)
+        return ctx.exception.message
+
+    def test_truncated_result_cannot_be_pasted(self):
+        with self.assertRaises(ConversionError) as ctx:
+            parse_decimal("0.101010…", 2)
+        self.assertIn("不能直接作为输入", ctx.exception.message)
+        self.assertIn("0.1(6)", ctx.exception.message)
+
+    def test_fraction_digits_count_towards_limit(self):
+        with self.assertRaises(ConversionError) as ctx:
+            parse_decimal("0." + "1" * 96, 10)  # 整数 1 位 + 小数 96 位 = 97
+        self.assertIn("过长", ctx.exception.message)
+        with self.assertRaises(ConversionError) as ctx:
+            parse_decimal(".(" + "1" * 97 + ")", 2)
+        self.assertIn("过长", ctx.exception.message)
+
+        # 整数部分为空时，小数 96 位刚好在限制内。
+        parsed = parse_decimal("." + "1" * 96, 10)
+        self.assertEqual(len(parsed.fraction_digits), 96)
+        # 0.(111…1)₂ 恰好等于 1，规范化后应进位成整数。
+        self.assertEqual(parse_decimal(".(" + "1" * 96 + ")", 2).normalized, "1")
+
+
+class FractionConversionTests(unittest.TestCase):
+    """小数换算：有尽小数、循环小数、负数与多步骤路线。"""
+
+    def test_terminating_decimal_to_binary(self):
+        result = build_conversion("0.625", 10, 2)
+        self.assertEqual(result.result_text, "0.101")
+        self.assertEqual(result.value, Fraction(5, 8))
+        self.assertEqual(result.decimal_text, "0.625")
+        self.assertEqual([step.kind for step in result.steps], ["multiply"])
+        step = result.steps[0]
+        self.assertEqual(len(step.rows), 3)
+        self.assertEqual(step.rows[0][1], "0.625")
+        self.assertEqual(step.rows[0][4], "1")
+        self.assertIn("0.101", step.formula)
+        self.assertIn("从上往下", step.footer)
+
+    def test_repeating_decimal_to_binary(self):
+        result = build_conversion("0.1", 10, 2)
+        self.assertEqual(result.value, Fraction(1, 10))
+        self.assertEqual(result.result_text, "0.0(0011)")
+        self.assertTrue(result.is_repeating)
+        self.assertEqual(result.target_fraction_digits, "0")
+        self.assertEqual(result.target_repeat_digits, "0011")
+        step = result.steps[0]
+        self.assertEqual(step.kind, "multiply")
+        self.assertIn("循环节", step.footer)
+        self.assertEqual(len(step.rows), 5)  # 1 位非循环 + 4 位循环节
+
+    def test_binary_fraction_to_decimal(self):
+        result = build_conversion("0.101", 2, 10)
+        self.assertEqual(result.result_text, "0.625")
+        self.assertEqual([step.kind for step in result.steps], ["expand"])
+        self.assertEqual(result.steps[0].rows[1][0], "-1")
+        self.assertEqual(result.steps[0].rows[1][4], "0.5")
+        self.assertEqual(result.steps[0].rows[1][5], "0.5")
+        self.assertIn("0.625", result.steps[0].formula)
+
+    def test_ternary_fraction_becomes_repeating_decimal(self):
+        result = build_conversion("0.1", 3, 10)
+        self.assertEqual(result.result_text, "0.(3)")
+        self.assertEqual(result.decimal_text, "0.(3)")
+        self.assertIn("0.(3)", result.steps[0].formula)
+
+    def test_ternary_fraction_to_binary(self):
+        result = build_conversion("0.1", 3, 2)
+        self.assertEqual(result.result_text, "0.(01)")
+        self.assertEqual([step.kind for step in result.steps], ["info", "expand", "multiply"])
+
+    def test_hex_fraction(self):
+        result = build_conversion("A.8", 16, 10)
+        self.assertEqual(result.result_text, "10.5")
+        self.assertEqual(result.value, Fraction(21, 2))
+        result = build_conversion("A.8", 16, 2)
+        self.assertEqual(result.result_text, "1010.1")
+        self.assertEqual(
+            [step.kind for step in result.steps],
+            ["info", "expand", "divide", "multiply"],
+        )
+
+    def test_negative_fraction(self):
+        result = build_conversion("-2.5", 10, 2)
+        self.assertEqual(result.result_text, "-10.1")
+        self.assertEqual(result.value, Fraction(-5, 2))
+        self.assertTrue(result.is_negative)
+        divide, multiply = result.steps
+        self.assertIn("绝对值", divide.title)
+        self.assertIn("绝对值", multiply.title)
+        self.assertIn("-0.1", multiply.formula)
+
+    def test_same_base_fraction_is_normalized(self):
+        result = build_conversion("0.10", 10, 10)
+        self.assertEqual(result.result_text, "0.1")
+        self.assertEqual(result.steps[0].formula, "(0.1)₁₀ = (0.1)₁₀")
+        self.assertIn("小数部分", result.steps[0].description)
+
+    def test_zero_fraction_is_integer(self):
+        result = build_conversion("0.000", 10, 2)
+        self.assertEqual(result.result_text, "0")
+        self.assertFalse(result.is_fraction)
+        self.assertEqual([step.kind for step in result.steps], ["divide"])
+
+    def test_fraction_steps_split_integer_and_fraction(self):
+        result = build_conversion("2.625", 10, 2)
+        self.assertEqual(result.result_text, "10.101")
+        divide, multiply = result.steps
+        self.assertEqual(divide.kind, "divide")
+        self.assertEqual(divide.rows[0][1], "2")
+        self.assertEqual(multiply.kind, "multiply")
+        self.assertEqual(multiply.rows[0][1], "0.625")
+
+    def test_repeating_cycle_round_trip(self):
+        binary = build_conversion("0.1", 10, 2).result_text
+        self.assertEqual(binary, "0.0(0011)")
+        back = build_conversion(binary, 2, 10)
+        self.assertEqual(back.result_text, "0.1")
+        self.assertEqual(back.value, Fraction(1, 10))
+
+    def test_repeating_input_notation(self):
+        result = build_conversion("0.1(6)", 10, 16)
+        self.assertEqual(result.value, Fraction(1, 6))
+        self.assertEqual(result.result_text, "0.2(A)")
+        self.assertEqual(result.steps[0].kind, "expand")
+        self.assertIn("循环小数", result.steps[0].title)
+        self.assertIn("1/6", result.steps[0].formula)
+
+    def test_negative_repeating_input(self):
+        result = build_conversion("-0.1(6)", 10, 16)
+        self.assertEqual(result.value, Fraction(-1, 6))
+        self.assertEqual(result.result_text, "-0.2(A)")
+        step = result.steps[0]
+        self.assertIn("绝对值", step.formula)
+        self.assertNotIn("-0.1(6) =", step.formula)
+        self.assertIn("负号", result.steps[-1].description)
+
+    def test_long_cycle_is_truncated(self):
+        period = (
+            "010309278350515463917525773195876288659793814432989690721649484536"
+            "082474226804123711340206185567"
+        )
+        text = ".(" + period + ")"  # 恰好 96 位循环节，等于 1/97
+        result = build_conversion(text, 10, 5)
+        self.assertTrue(result.target_truncated)
+        self.assertEqual(len(result.target_fraction_digits), MAX_FRACTION_OUTPUT_DIGITS)
+        self.assertFalse(result.target_repeat_digits)
+        self.assertTrue(result.result_text.endswith("…"))
+        self.assertIn("64", result.steps[-1].footer)
+
+        # 同进制回显不应被截断：仍然完整保留 96 位循环节。
+        same = build_conversion(text, 10, 10)
+        self.assertFalse(same.target_truncated)
+        self.assertEqual(len(same.target_repeat_digits), 96)
+
+    def test_value_is_exact_not_float(self):
+        result = build_conversion("3.14", 10, 2)
+        self.assertEqual(result.value, Fraction(157, 50))
+        self.assertEqual(result.decimal_text, "3.14")
+        self.assertTrue(result.result_text.startswith("11.0("))
 
 
 class ErrorPositionTests(unittest.TestCase):
@@ -613,10 +899,30 @@ class PublicApiTests(unittest.TestCase):
 
     def test_build_quick_examples(self):
         examples = list(build_quick_examples())
-        self.assertEqual(len(examples), 4)
+        self.assertEqual(len(examples), 8)
         for label, text, source, target in examples:
             self.assertIsInstance(label, str)
             self.assertEqual(build_conversion(text, source, target).raw, text)
+        # 示例中必须包含小数与循环小数，方便课堂演示新功能。
+        self.assertTrue(any("." in text for _, text, _, _ in examples))
+        self.assertTrue(any("循环" in label for label, _, _, _ in examples))
+
+    def test_public_result_fields_for_fraction(self):
+        result = build_conversion("0.1(6)", 10, 16)
+        self.assertEqual(result.raw, "0.1(6)")
+        self.assertEqual(result.source_base, 10)
+        self.assertEqual(result.target_base, 16)
+        self.assertEqual(result.normalized, "0.1(6)")
+        self.assertEqual(result.source_digits, "0")
+        self.assertEqual(result.result_text, "0.2(A)")
+        self.assertEqual(result.value, Fraction(1, 6))
+        self.assertTrue(result.is_fraction)
+        self.assertTrue(result.is_repeating)
+        self.assertFalse(result.is_negative)
+        self.assertEqual(result.target_integer_digits, "0")
+        self.assertEqual(result.target_fraction_digits, "2")
+        self.assertEqual(result.target_repeat_digits, "A")
+        self.assertEqual(result.decimal_text, "0.1(6)")
 
     def test_public_result_fields(self):
         result = build_conversion("FF", 16, 2)
